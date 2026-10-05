@@ -1,0 +1,1092 @@
+System.getContext() || (function () {
+    return this;
+}).call(null);
+var VROES = __global.__VROES || (__global.__VROES = System.getModule("com.vmware.pscoe.library.ecmascript").VROES()), tslib_1 = VROES.tslib, exports = {};
+var Logger_1 = VROES.importLazy("com.vmware.pscoe.library.ts.logging/Logger");
+var pipeline_1 = VROES.importLazy("com.vmware.pscoe.library.ts.pipeline");
+var ResourceElementAccessor_1 = VROES.importLazy("com.vmware.pscoe.library.ts.util/ResourceElementAccessor");
+var UserService_1 = VROES.importLazy("com.vmware.pscoe.sbi.meghdootAugmentation.ts.actions/ad/UserService");
+var AlgosecConnector_1 = VROES.importLazy("com.vmware.pscoe.sbi.common.actions/firewall/services/AlgosecConnector");
+var ResourceUtil_1 = VROES.importLazy("com.vmware.pscoe.sbi.common.actions/firewall/services/ResourceUtil");
+var IpService_1 = VROES.importLazy("com.vmware.pscoe.sbi.common.actions/firewall/services/IpService");
+var EmailService_1 = VROES.importLazy("com.vmware.pscoe.sbi.meghdootAugmentation.ts.actions/email/EmailService");
+var ConfigElement_1 = VROES.importLazy("com.vmware.pscoe.sbi.common.elements/config/firewall/AlgosecConfig");
+var BaseBuilder_1 = VROES.importLazy("com.vmware.pscoe.sbi.meghdootAugmentation.ts.actions/reporting/tasks/BaseBuilder");
+var VmListBuilder_1 = VROES.importLazy("com.vmware.pscoe.sbi.meghdootAugmentation.ts.actions/reporting/tasks/VmListBuilder");
+var FinalPreValidationTask = /** @class */ (function (_super) {
+    tslib_1.__extends(FinalPreValidationTask, _super);
+    function FinalPreValidationTask() {
+        var _this = _super !== null && _super.apply(this, arguments) || this;
+        _this.logger = Logger_1._.Logger.getLogger("FinalPreValidationTask");
+        return _this;
+    }
+    FinalPreValidationTask.prototype.execute = function () {
+        var _this = this;
+        this.logger.info("Starting execution of Algosec CSV validation.");
+        var algosecConnector = new AlgosecConnector_1._.AlgosecConnector();
+        var ipService = new IpService_1._.IpService();
+        var vmListBuilder = new VmListBuilder_1._.VmListBuilder();
+
+        // Retrieve the data from Segregated Data
+        var segregatedPath = 'SBI Meghdoot/Firewall/SegregateMatchingIP/DefaultAllowed.csv';
+        var segregatedDataRe = new ResourceElementAccessor_1._.ResourceElementAccessor(segregatedPath, false);
+        var segregatedDataCsvContent = segregatedDataRe.getContent(); // Raw CSV content
+        segregatedDataRe.setContent("");
+        var userName = System.getContext().getParameter("__metadata_userName");
+        var dateInfotest = new Date();
+        dateInfotest.setMinutes(dateInfotest.getMinutes() + 330);
+        var dateInfo = dateInfotest.toISOString().replace("T", " ").split(".")[0];
+
+        var finalRulesPath = "SBI Meghdoot/Firewall/PendingRules/P_" + userName + "_" + dateInfo + ".csv";
+        ResourceUtil_1._.ResourceUtils.createResourceElement(finalRulesPath, "");
+        var finalRulesRe = new ResourceElementAccessor_1._.ResourceElementAccessor(finalRulesPath, true);
+        var nonAllowedRulesPath = 'SBI Meghdoot/Firewall/nonAllowedRules.csv';
+        var nonAllowedRulesRe = new ResourceElementAccessor_1._.ResourceElementAccessor(nonAllowedRulesPath, true);
+
+        // Retrieve the data from NonSegregated Data
+        var nonSegregatedDataPath = 'SBI Meghdoot/Firewall/SegregateMatchingIP/NonSegregatedChangeRequests.csv';
+        var nonSegregatedDataRe = new ResourceElementAccessor_1._.ResourceElementAccessor(nonSegregatedDataPath, false);
+        var nonSegregatedCsvContent = nonSegregatedDataRe.getContent(); // Raw CSV content
+
+        // Parse the CSV content into an array of objects
+        var nonSegregatedDataCsv = algosecConnector.parseCsv(nonSegregatedCsvContent);
+        var segregatedDataCsv = algosecConnector.parseCsv(segregatedDataCsvContent);
+
+        // Retrieve the data from the VRF.csv
+        var vrfData = 'SBI Meghdoot/Resources/VRFMapping.csv';
+        var resoElement = new ResourceElementAccessor_1._.ResourceElementAccessor(vrfData, false);
+        var vrfCsvContent = resoElement.getContent(); // Raw CSV content
+
+        // Parse the VRF CSV content into an array of objects
+        var vrfDataCsv = algosecConnector.parseCsv(vrfCsvContent); // Pass the full CSV content as a string
+
+        // Extract Subnet and VRF List from the parsed CSV (first column of each row)
+        var subnetList = vrfDataCsv.map(function (row) { return row.Subnet; });
+
+        //var subnetList = vrfDataCsv.map(row => row.Subnet);
+
+        var vrfList = vrfDataCsv.map(function (row) { return row.VRF; });
+        //Extract Site from the respective subnetList from the parsed CSV (3rd column)
+        var siteList = vrfDataCsv.map(function (row) { return row.Site; });
+        var tierList = vrfDataCsv.map(function (row) { return row.Tier; });
+        var allowedRules = [];
+        var nonAllowedRules = [];
+        var unmatchedRules = [];
+
+        // Process each entry in nonSegregatedDataCsv (Source and Destination)
+        // Process each entry in nonSegregatedDataCsv (Source and Destination)
+        nonSegregatedDataCsv.forEach(function (entry) {
+            var id = entry["Change Request ID"];
+            var ruleName = entry["Rule Name"];
+            var apmId = entry["APM ID"];
+            var expiry = entry["FAR Expiry"];
+            var sourceIp = entry["Source"].split(','); // Split source IPs into array
+            var destinationIp = entry["Destination"].split(','); // Split destination IPs into array
+            var service = entry["Service"];
+            var application = entry["Application"];
+            var action = entry["Action"];
+            var zone = entry["Zone"];
+            var requestor = entry["Requestor"];
+            var requesterDepartmentName = entry["requesterDepartmentName"];
+            var requesterApplicationName = entry["RequesterApplication"];
+
+            // Arrays to hold matching VRFs and other information
+            var allSourceVrfs = [];
+            var allDestinationVrfs = [];
+            var allSourceSites = [];
+            var allDestinationSites = [];
+            var allSourceTiers = [];
+            var allDestinationTiers = [];
+
+            // Check if source IPs match with the subnets
+            sourceIp.forEach(function (srcIp) {
+                subnetList.forEach(function (subnet, index) {
+                    if (ipService.ipInSubnets(srcIp, subnet)) {
+                        allSourceVrfs.push(vrfList[index]);
+                        allSourceSites.push(siteList[index]);
+                        allSourceTiers.push(tierList[index]);
+                    }
+                });
+            });
+
+            // Check every source IP against every subnet
+            // for (var i = 0; i < sourceIp.length; i++) {
+            //     var srcIp = sourceIp[i];
+
+            //     for (var j = 0; j < subnetList.length; j++) {
+            //         var subnet = subnetList[j];
+
+            //         if (ipService.ipInSubnets(srcIp, subnet)) {
+            //             System.log(
+            //                 "Source IP " + srcIp +
+            //                 " matches subnet " + subnet +
+            //                 " | VRF: " + vrfList[j] +
+            //                 " | Site: " + siteList[j] +
+            //                 " | Tier: " + tierList[j]
+            //             );
+
+            //             allSourceVrfs.push(vrfList[j]);
+            //             allSourceSites.push(siteList[j]);
+            //             allSourceTiers.push(tierList[j]);
+            //         }
+            //     }
+            // }
+
+            // Check if destination IPs match with the subnets
+            destinationIp.forEach(function (dstIp) {
+                subnetList.forEach(function (subnet, index) {
+                    if (ipService.ipInSubnets(dstIp, subnet)) {
+                        allDestinationVrfs.push(vrfList[index]);
+                        allDestinationSites.push(siteList[index]);
+                        allDestinationTiers.push(tierList[index]);
+                    }
+                });
+            });
+
+            System.log("Print allSourceVrfs : " + JSON.stringify(allSourceVrfs));
+            System.log("Print allDestinationVrfs : " + JSON.stringify(allDestinationVrfs));
+
+            // Check for matching source and destination VRFs
+            allSourceVrfs.forEach(function (sourceVrf, srcIndex) {
+                allDestinationVrfs.forEach(function (destinationVrf, dstIndex) {
+                    if (sourceVrf === destinationVrf) {
+                        allowedRules.push({
+                            "Change Request ID": id,
+                            "APM ID": apmId,
+                            "Rule Name": ruleName,
+                            "Expires": expiry,
+                            "VRF": sourceVrf,
+                            "Source": sourceIp.join(', '),
+                            "Destination": destinationIp.join(', '),
+                            "Service": service,
+                            "Application": application,
+                            "Action": action,
+                            "Site": allSourceSites[srcIndex] || allDestinationSites[dstIndex],
+                            "Tier": allSourceTiers[srcIndex] || allDestinationTiers[dstIndex],
+                            "Zone": zone,
+                            "Requestor": requestor,
+                            "requesterDepartmentName": requesterDepartmentName,
+                            "requesterApplicationName": requesterApplicationName
+                        });
+                    } else {
+                        nonAllowedRules.push({
+                            "Change Request ID": id,
+                            "APM ID": apmId,
+                            "Rule Name": ruleName,
+                            "Expires": expiry,
+                            "Source": sourceIp.join(', '),
+                            "Destination": destinationIp.join(', '),
+                            "Service": service,
+                            "Application": application,
+                            "Action": action
+                        });
+                    }
+                });
+            });
+        });
+
+
+        // Process each entry in SegregatedDatasCsv (Source and Destination)
+        this.logger.info("Adding Allowed List Segregated Rules");
+        segregatedDataCsv.forEach(function (entry) {
+            var id = entry["Change Request ID"];
+            var apmId = entry["APM ID"];
+            var ruleName = entry["Rule Name"];
+            var expiry = entry["FAR Expiry"];
+            var sourceIp = entry["Source"];
+            var destinationIp = entry["Destination"];
+            var service = entry["Service"];
+            var application = entry["Application"];
+            var action = entry["Action"];
+            var zone = entry["Zone"];
+            var requestor = entry["Requestor"];
+            var requesterDepartmentName = entry["requesterDepartmentName"];
+            var requesterApplicationName = entry["RequesterApplication"];
+            System.log("print 1 value : " + sourceIp)
+            // var comments = entry.comments;
+            // var sourcePort = entry.sourcePort;
+            _this.logger.info("Adding Segregated Rules to the Allowed List: ".concat(sourceIp, " - ").concat(destinationIp));
+            var sourceVrf = "";
+            var destinationVrf = "";
+            var sourceSite = "";
+            var destinationSite = "";
+            var sourceTier = "";
+            var destinationTier = "";
+
+            var bothVrfEmpty = true;
+
+            for (var index = 0; index < subnetList.length; index++) {
+                System.log("Pting for loop2source ip : " + sourceIp);
+                if (ipService.ipInSubnets(sourceIp, subnetList[index])) {
+                    sourceVrf = vrfList[index];// Assign VRF from the same index as the matching subnet
+                    sourceSite = siteList[index];
+                    sourceTier = tierList[index];
+                    System.log("Print Source VRF : " + sourceVrf + sourceSite)
+                    bothVrfEmpty = false;
+                    break;  // Exit loop once the VRF is assigned
+
+
+                }
+            }
+            for (var index = 0; index < subnetList.length; index++) {
+                System.log("Pting for loop 2destimation ip : " + destinationIp);
+                if (ipService.ipInSubnets(destinationIp, subnetList[index])) {
+                    destinationVrf = vrfList[index]; //Assign VRF from the same index as the matching subnet
+                    destinationSite = siteList[index];
+                    destinationTier = tierList[index];
+                    System.log("Print Source VRF : " + destinationVrf + destinationSite)
+                    bothVrfEmpty = false;
+                    break;  // Exit loop once the VRF is assigned
+                }
+            }
+
+            // -- if no match was found for both source and destination IPs;  log and move to unmatched rules
+
+            if (bothVrfEmpty) {
+                System.warn(" No VRF match found for rule");
+                unmatchedRules.push({
+                    "Change Request ID": id,
+                    "APM ID": apmId,
+                    "Rule Name": ruleName,
+                    "Source": sourceIp,
+                    "Destination": destinationIp,
+                    "Service": service,
+                    "Application": application,
+                    "Action": action,
+                });
+                return; // This will skip rules to add in allowedRules
+            }
+            // IF match is found, push it in the allowedRules list
+            allowedRules.push({
+                "Change Request ID": id,
+                "APM ID": apmId,
+                "Rule Name": ruleName,
+                "Expires": expiry,
+                "VRF": sourceVrf == "" ? destinationVrf : sourceVrf,
+                "Source": sourceIp,
+                "Destination": destinationIp,
+                "Service": service,
+                "Application": application,
+                "Action": action,
+                "Site": sourceSite == "" ? destinationSite : sourceSite,
+                "Tier": sourceTier == "" ? destinationTier : sourceTier,
+                "Zone": zone,
+                "Requestor": requestor,
+                "requesterDepartmentName": requesterDepartmentName,
+                "requesterApplicationName": requesterApplicationName
+                // "Comments": comments,
+                // "Source Port": sourcePort
+            });
+            System.log("AllowedRules : " + JSON.stringify(allowedRules));
+        });
+
+        // After processing segregated rules, handle unmatched rules
+        if (unmatchedRules.length > 0) {
+            this.logger.info("Unmatched rules (no VRF found) are logged.");
+            System.log("Unmatched Rules: " + JSON.stringify(unmatchedRules));
+
+            // Optionally, save the unmatched rules to a resource element for review or further processing
+            var unmatchedRulesPath = 'SBI Meghdoot/Firewall/UnmatchedRules.csv';
+            var unmatchedRulesRe = new ResourceElementAccessor_1._.ResourceElementAccessor(unmatchedRulesPath, true);
+            var csvDataForUnmatched = convertToCSV(unmatchedRules, { delimiters: ",", newLine: "\n" });
+            unmatchedRulesRe.setContent(csvDataForUnmatched);
+            this.logger.info("Unmatched Rules saved to resource element at " + unmatchedRulesPath);
+        }
+        // Group data by Change Request ID and process
+        var groupedByChangeRequestId = algosecConnector.groupByChangeRequestId(allowedRules);
+        var finalList = [];
+        for (var changeRequestId in groupedByChangeRequestId) {
+            var group = groupedByChangeRequestId[changeRequestId];
+            var ruleNumber = 1;
+            for (var _i = 0, group_1 = group; _i < group_1.length; _i++) {
+                var changeRequest = group_1[_i];
+                System.log("Print GRP : " + JSON.stringify(group_1[_i]));
+                var apmId = changeRequest["APM ID"];
+                var ruleName = changeRequest["Rule Name"];
+                var expiry = changeRequest["Expires"];
+                var vrf = changeRequest["VRF"];
+                var source = changeRequest["Source"];
+                var destination = changeRequest["Destination"];
+                var service = changeRequest["Service"];
+                var application = changeRequest["Application"];
+                var action = changeRequest["Action"];
+                var site = changeRequest["Site"];
+                var tier = changeRequest["Tier"];
+                var zone = changeRequest["Zone"];
+                var requestor = changeRequest["Requestor"];
+                var requesterDepartmentName = changeRequest["requesterDepartmentName"];
+                var requesterApplicationName = changeRequest["requesterApplicationName"]
+                // var comments = changeRequest["Comments"];
+                // var sourcePort = changeRequest["Source Port"];
+                // Generate rule name regardless of allow list match
+                // var ruleName = "".concat("NSPM", "-").concat(changeRequestId, "-").concat(algosecConnector.padRuleNumber(ruleNumber));
+                finalList.push({
+                    // "Rule Name": ruleName,
+                    "Change Request ID": changeRequest["Change Request ID"],
+                    "APM ID": apmId,
+                    "Rule Name": ruleName,
+                    "FAR Expiry": expiry,
+                    "VRF": vrf,
+                    "Source": source,
+                    "Destination": destination,
+                    "Service": service,
+                    "Application": application,
+                    "Action": action,
+                    "Site": site,
+                    "Tier": tier,
+                    "Zone": zone,
+                    "Requestor": requestor,
+                    "requesterDepartmentName": requesterDepartmentName,
+                    "requesterApplicationName": requesterApplicationName
+                    // "Comments": comments,
+                    // "Source Port": sourcePort
+                });
+            }
+            //ruleNumber++; // Increment rule number for the same Change Request ID
+        }
+
+        // Saving allowed Data
+        if (finalList.length > 0) {
+            var csvData = convertToCSV(finalList, { delimiters: ",", newLine: "\n" });
+            finalRulesRe.setContent(csvData);
+            this.logger.info("Final Rules Request Details saved to resource element at ".concat(finalRulesPath, "."));
+        } else {
+            var blankCsvData = "Change Request ID";
+            finalRulesRe.setContent(blankCsvData);
+            this.logger.info("Final list is empty. Blank csv saved to resource element ")
+        }
+
+        // Saving unmatched rules
+        if (unmatchedRules.length > 0) {
+            var csvDataForNonAllowed = convertToCSV(unmatchedRules, { delimiters: ",", newLine: "\n" });
+            unmatchedRulesRe.setContent(csvDataForNonAllowed);
+            this.logger.info("Non Allowed rules deatils saved to resource element at ".concat(unmatchedRulesPath, "."));
+        }
+
+        // Fetch requestor email and CC addresses from configuration
+        var requestorName = System.getContext().getParameter("__metadata_userName");
+        System.log("Print requestor name: " + requestorName);
+        var requestorEmail = new UserService_1._.UserService().getEmailAddress(requestorName);
+        System.log("Print requestor email: " + requestorEmail);
+
+        // Send email with pending CSV attached
+        var emailService = new EmailService_1._.EmailService();
+        var rawData = finalRulesRe.getContent();
+
+        System.log("Raw attachment data: " + rawData + typeof (rawData));
+
+
+        // Convert parsed data to CSV
+        var baseBuilder = new BaseBuilder_1._.BaseBuilder();
+        //var csv = convertToCSV(rawData, { delimiters: ",", newLine: "\n" });
+        //System.log("Converted CSV: \n" + csv);
+
+        // Build the CSV attachment using BaseBuilder
+        var csvMimeAttachment = baseBuilder.createAttachment("Firewall_Rules_Validation_Report.csv", rawData);
+        System.log("Print after basebuilder conversion : " + JSON.stringify(csvMimeAttachment));
+        System.log("Print w/o json : " + csvMimeAttachment.content);
+        this.context.contentInFile = csvMimeAttachment;
+        System.log("Print after the context : " + this.context.contentInFile);
+
+        // Ensure `attachments` is an array before passing it
+        // var allAttachments = rawData ? [csvMimeAttachment] : [];
+        // System.log("Print attachment changes : " + JSON.stringify(allAttachments));
+
+        // Send email
+        emailService.preValidationNotification(requestorEmail, requestorName, [csvMimeAttachment]);
+
+        this.logger.info("Email sent to " + requestorEmail);
+        System.log("Email sent to " + requestorEmail);
+        if (nonAllowedRules && nonAllowedRules.length > 0) {
+            var csvDatafornon = convertToCSV(nonAllowedRules, { delimiters: ",", newLine: "\n" });
+            nonAllowedRulesRe.setContent(csvDatafornon)
+            this.logger.info("Final Rules Request Details saved to resource element at ".concat(nonAllowedRulesPath, "."));
+        } else {
+            this.logger.warn("No non-allowed rules found. RE is not updated");
+        }
+
+
+        //Clear CSVs
+        nonAllowedRulesRe.setContent("");
+        this.logger.info("Non Allowed rules CSV cleared");
+        nonSegregatedDataRe.setContent("");
+
+        function convertToCSV(data) {
+            //Get the header by extracting the keys
+            var headers = Object.keys(data[0]);
+
+            //Create the rows by mapping each object to string of comma-seprated values
+            var rows = data.map(function (row) {
+                return headers.map(function (header) {
+                    return row[header];
+                }).join(',');
+
+            });
+
+            //Join headers and rows together to cerate the final csv string
+            var result = headers.join(',') + '\n' + rows.join('\n');
+            return result;
+        }
+
+
+
+    };
+    return FinalPreValidationTask;
+}(pipeline_1._.Task));
+exports.FinalPreValidationTask = FinalPreValidationTask;
+return exports;
+-----------------------------------
+
+var __global = System.getContext() || (function () {
+    return this;
+}).call(null);
+var VROES = __global.__VROES || (__global.__VROES = System.getModule("com.vmware.pscoe.library.ecmascript").VROES()), tslib_1 = VROES.tslib, exports = {};
+var Logger_1 = VROES.importLazy("com.vmware.pscoe.library.ts.logging/Logger");
+var AlgosecConfig_1 = VROES.importLazy("com.vmware.pscoe.sbi.common.elements/config/firewall/AlgosecConfig");
+var pipeline_1 = VROES.importLazy("com.vmware.pscoe.library.ts.pipeline");
+var ResourceElementAccessor_1 = VROES.importLazy("com.vmware.pscoe.library.ts.util/ResourceElementAccessor");
+var AlgosecConnector_1 = VROES.importLazy("com.vmware.pscoe.sbi.common.actions/firewall/services/AlgosecConnector");
+var SegregationTask = /** @class */ (function (_super) {
+    tslib_1.__extends(SegregationTask, _super);
+    function SegregationTask() {
+        var _this = _super !== null && _super.apply(this, arguments) || this;
+        _this.logger = Logger_1._.Logger.getLogger("SegregationTask");
+        return _this;
+    }
+    SegregationTask.prototype.execute = function () {
+        this.logger.info("Starting execution of IP Segregation task.");
+        var algosecConnector = new AlgosecConnector_1._.AlgosecConnector();
+
+        // Retrieve and clean the allow list
+        var rawAllowList = new AlgosecConfig_1._.AlgosecConfig().getAllowList().split(',');
+        System.log("Print rawAllowedList : " + rawAllowList);
+        var allowList = [];
+        for (var i = 0; i < rawAllowList.length; i++) {
+            allowList.push(rawAllowList[i].trim());
+        }
+        System.log("Print allowed List : " + JSON.stringify(allowList));
+
+        var approvedChangeRequestDetailsPath = 'SBI Meghdoot/Firewall/FetchedDetails/ApprovedChangeRequestDetails.csv';
+        var resourceElement = new ResourceElementAccessor_1._.ResourceElementAccessor(approvedChangeRequestDetailsPath, false);
+        var changeRequestDetailsCsv = resourceElement.getContent();
+        this.logger.info("Fetched ChangeRequestDetails CSV content.");
+        var parsedData = algosecConnector.parseCsv(changeRequestDetailsCsv);
+        var groupedByChangeRequestId = algosecConnector.groupByChangeRequestId(parsedData);
+
+        var segregatedData = [];
+        var nonSegregatedData = [];
+
+        for (var changeRequestId in groupedByChangeRequestId) {
+            var group = groupedByChangeRequestId[changeRequestId];
+            for (var _i = 0, group_1 = group; _i < group_1.length; _i++) {
+                var changeRequest = group_1[_i];
+                var id = changeRequest["Change Request ID"];
+                var ruleName = changeRequest["Rule Name"];
+                var apmId = changeRequest["APM ID"];
+                var expiry = changeRequest["FAR Expiry"]
+                var source = changeRequest["Source"];
+                var destination = changeRequest["Destination"];
+                var service = changeRequest["Service"];
+                var application = changeRequest["Application"];
+                var action = changeRequest["Action"];
+                var zone = changeRequest["Zone"];
+                var requestor = changeRequest["Requestor"];
+                var requesterDepartmentName = changeRequest["Requester Department"];
+                var requesterApplicationName = changeRequest["RequesterApplication"];
+
+                // Convert source and destination to arrays
+                var sourceList = source.split(';').map(function (items) { return items.trim(); });
+                System.log("SourceList: " + JSON.stringify(sourceList));
+                var rawSourceList = source.split(',');
+                for (var s = 0; s < rawSourceList.length; s++) {
+                    sourceList.push(rawSourceList[s].trim());
+                }
+                System.log("Proing rawSourceList : " + rawSourceList);
+                System.log("Print Source List : " + JSON.stringify(sourceList));
+
+                var destinationList = destination.split(';').map(function (items) { return items.trim(); });
+                System.log("DestinationList: " + JSON.stringify(destinationList));
+                var rawDestinationList = destination.split(',');
+                for (var d = 0; d < rawDestinationList.length; d++) {
+                    destinationList.push(rawDestinationList[d].trim());
+                }
+                System.log("Print rawDestiantionList : " + rawDestinationList);
+                System.log("Print Destination List : " + JSON.stringify(destinationList));
+
+                // Check if any source or destination matches any allowList entry
+                var isSourceAllowed = false;
+                for (var si = 0; si < sourceList.length && !isSourceAllowed; si++) {
+                    for (var ai = 0; ai < allowList.length; ai++) {
+                        var src = sourceList[si].trim();
+                        var allowed = allowList[ai].trim();
+                        System.log("Checking source IP [ " + src + "] against allow List items [" + allowed);
+                        if (src === allowed) {
+                            isSourceAllowed = true;
+                            break;
+                        }
+                    }
+                }
+                System.log("Print isSoureceAllowed : " + isSourceAllowed);
+
+                var isDestinationAllowed = false;
+                for (var di = 0; di < destinationList.length && !isDestinationAllowed; di++) {
+                    for (var ai = 0; ai < allowList.length; ai++) {
+                        var dst = destinationList[di].trim();
+                        var allowed = allowList[ai].trim();
+                        System.log("Checking destination IP [ " + dst + "] against allow List items [" + allowed);
+                        if (dst === allowed) {
+                            isDestinationAllowed = true;
+                            break;
+                        }
+                    }
+                }
+                System.log("Print isDestinationAllowed : " + isDestinationAllowed);
+
+                System.log("Raw Source : " + source);
+                System.log("Source List: " + JSON.stringify(sourceList));
+
+                if (isSourceAllowed || isDestinationAllowed) {
+                    this.logger.info("SourceAllowed: " + isSourceAllowed + ", DestinationAllowed: " + isDestinationAllowed);
+                    segregatedData.push({
+                        "Change Request ID": id,
+                        "Rule Name": ruleName,
+                        "APM ID": apmId,
+                        "FAR Expiry": expiry,
+                        "Source": source,
+                        "Destination": destination,
+                        "Service": service,
+                        "Application": application,
+                        "Action": action,
+                        "Zone": zone,
+                        "Requestor": requestor,
+                        "requesterDepartmentName": requesterDepartmentName,
+                        "requesterApplicationName": requesterApplicationName
+                    });
+                } else {
+                    nonSegregatedData.push({
+                        "Change Request ID": id,
+                        "Rule Name": ruleName,
+                        "APM ID": apmId,
+                        "FAR Expiry": expiry,
+                        "Source": source,
+                        "Destination": destination,
+                        "Service": service,
+                        "Application": application,
+                        "Action": action,
+                        "Zone": zone,
+                        "Requestor": requestor,
+                        "requesterDepartmentName": requesterDepartmentName,
+                        "RequesterApplication": requesterApplicationName
+                    });
+                }
+            }
+        }
+
+        var segregatedDataPath = 'SBI Meghdoot/Firewall/SegregateMatchingIP/DefaultAllowed.csv';
+        var segregatedDataRe = new ResourceElementAccessor_1._.ResourceElementAccessor(segregatedDataPath, true);
+        var nonSegregatedDataPath = 'SBI Meghdoot/Firewall/SegregateMatchingIP/NonSegregatedChangeRequests.csv';
+        var nonSegregatedDataRe = new ResourceElementAccessor_1._.ResourceElementAccessor(nonSegregatedDataPath, true);
+
+        if (segregatedData.length > 0) {
+            System.log("Print segregated Data : " + JSON.stringify(segregatedData));
+            var csvData = convertToCSV(segregatedData, { delimiters: ",", newLine: "\n" });
+            segregatedDataRe.setContent(csvData);
+            this.logger.info("Segregated change request details saved to resource element at ".concat(segregatedDataPath, "."));
+        } else {
+            this.logger.warn("No data matching allow list in segregated data.");
+        }
+
+        if (nonSegregatedData.length > 0) {
+            var nonSegregatedCsvData = convertToCSV(nonSegregatedData, { delimiters: ",", newLine: "\n" });
+            nonSegregatedDataRe.setContent(nonSegregatedCsvData);
+            this.logger.info("Non-segregated change request details saved to resource element at ".concat(nonSegregatedDataPath, "."));
+        } else {
+            this.logger.warn("No non-segregated data found.");
+        }
+
+        function convertToCSV(data) {
+            var headers = Object.keys(data[0]);
+            var rows = data.map(function (row) {
+                return headers.map(function (header) {
+                    return row[header];
+                }).join(',');
+            });
+            var result = headers.join(',') + '\n' + rows.join('\n');
+            return result;
+        }
+    };
+    return SegregationTask;
+}(pipeline_1._.Task));
+exports.SegregationTask = SegregationTask;
+return exports;
+
+
+-------------------------------------------------
+
+/*
+         * #%L
+         * common
+         * %%
+         * Copyright (C) 2020 - 2025 VMWARE
+         * %%
+         * This program is licensed under Technical Preview License by VMware.
+         * VMware shall own and retain all right, title and interest in and to the Intellectual Property Rights in the Technology Preview Software.
+         * ALL RIGHTS NOT EXPRESSLY GRANTED IN LICENSE ARE RESERVED TO VMWARE.
+         * VMware is under no obligation to support the Technology Preview Software in any way or to provide any Updates to Licensee.
+         * You should have received a copy of the Technical Preview License along with this program.  If not, see
+         * <https://flings.vmware.com/vrealize-build-tools/license>
+         * #L%
+         */
+var exports = {};
+var IpService = /** @class */ (function () {
+    function IpService() {
+    }
+    IpService.prototype.ipInSubnets = function (ips, subnetCidr) {
+        var ipList = ips.split(';');
+        var parts = subnetCidr.split('/');
+        var subnet = parts[0];
+        var cidr = parseInt(parts[1], 10);
+
+        // Generate the subnet mask based on the CIDR length
+        var mask = this.generateSubnetMask(cidr);
+
+        // Check each IP or range
+        for (var i = 0; i < ipList.length; i++) {
+            var ipOrRange = ipList[i].trim(); // Trim spaces
+
+            // If it's a range, split it into start and end IP
+            if (this.isRange(ipOrRange)) {
+                var rangeParts = ipOrRange.split('-');
+                var startIp = rangeParts[0].trim();
+                var endIp = rangeParts[1].trim();
+
+                // Check if any IP within the range belongs to the subnet
+                if (this.isIpInRange(startIp, endIp, subnet, mask)) {
+                    return true;
+                }
+            } else {
+                // It's a single IP, check if it belongs to the subnet
+                if (this.ipInSubnetWithMask(ipOrRange, subnet, mask)) {
+                    return true;
+                }
+            }
+        }
+
+        // Return false if no IP or range matched the subnet
+        return false;
+    }
+
+    IpService.prototype.isRange = function (ipOrRange) {
+        // Basic check if the string contains a '-' (i.e., it’s a range)
+        return ipOrRange.indexOf('-') !== -1;
+    }
+
+    IpService.prototype.ipInSubnetWithMask = function (ip, subnet, mask) {
+        // Convert IP, subnet, and mask to binary form
+        var ipBinary = this.ipToBinary(ip);
+        var subnetBinary = this.ipToBinary(subnet);
+        var maskBinary = this.ipToBinary(mask);
+
+        // Check if the IP matches the subnet according to the mask
+        var maskedIp = this.applyMask(ipBinary, maskBinary);
+        var maskedSubnet = this.applyMask(subnetBinary, maskBinary);
+
+        return maskedIp === maskedSubnet;
+    }
+
+    IpService.prototype.isIpInRange = function (startIp, endIp, subnet, mask) {
+        // Convert range to binary
+        var startBinary = this.ipToBinary(startIp);
+        var endBinary = this.ipToBinary(endIp);
+        var subnetBinary = this.ipToBinary(subnet);
+        var maskBinary = this.ipToBinary(mask);
+
+        // Convert the subnet mask to apply to the range
+        var maskedStart = this.applyMask(startBinary, maskBinary);
+        var maskedEnd = this.applyMask(endBinary, maskBinary);
+        var maskedSubnet = this.applyMask(subnetBinary, maskBinary);
+
+        // Check if any IP in the range is in the subnet
+        return (maskedStart === maskedSubnet || maskedEnd === maskedSubnet);
+    }
+
+    IpService.prototype.ipToBinary = function (ip) {
+        // Convert an IP address to binary form
+        return ip.split('.').map(function (n) {
+            var binary = (parseInt(n, 10)).toString(2);
+            return '00000000'.substring(binary.length) + binary;  // Pad the binary string
+        }).join('');
+    }
+
+    IpService.prototype.applyMask = function (binaryIp, binaryMask) {
+        // Apply subnet mask on the IP address (AND operation)
+        var result = '';
+        for (var i = 0; i < binaryIp.length; i++) {
+            result += (binaryIp[i] === '1' && binaryMask[i] === '1') ? '1' : '0';
+        }
+        return result;
+    }
+
+    IpService.prototype.generateSubnetMask = function (maskLength) {
+        // Generate the subnet mask from CIDR length
+        var mask = '';
+        for (var i = 0; i < 32; i++) {
+            mask += (i < maskLength) ? '1' : '0';
+        }
+
+        // Split into 4 octets (8 bits each)
+        var octets = [];
+        for (var i = 0; i < 4; i++) {
+            octets.push(parseInt(mask.slice(i * 8, (i + 1) * 8), 2));
+        }
+
+        return octets.join('.');
+
+    }
+    return IpService;
+}());
+exports.IpService = IpService;
+return exports;
+
+--------------------------------------
+
+var __global = System.getContext() || (function () {
+    return this;
+}).call(null);
+var VROES = __global.__VROES || (__global.__VROES = System.getModule("com.vmware.pscoe.library.ecmascript").VROES()), tslib_1 = VROES.tslib, exports = {};
+var Logger_1 = VROES.importLazy("com.vmware.pscoe.library.ts.logging/Logger");
+var AlgosecConnector_1 = VROES.importLazy("com.vmware.pscoe.sbi.common.actions/firewall/services/AlgosecConnector");
+var pipeline_1 = VROES.importLazy("com.vmware.pscoe.library.ts.pipeline");
+var ResourceElementAccessor_1 = VROES.importLazy("com.vmware.pscoe.library.ts.util/ResourceElementAccessor");
+var EmailService_1 = VROES.importLazy("com.vmware.pscoe.sbi.meghdootAugmentation.ts.actions/email/EmailService");
+var UserService_1 = VROES.importLazy("com.vmware.pscoe.sbi.meghdootAugmentation.ts.actions/ad/UserService");
+var BaseBuilder_1 = VROES.importLazy("com.vmware.pscoe.sbi.meghdootAugmentation.ts.actions/reporting/tasks/BaseBuilder");
+var ResourceUtil_1 = VROES.importLazy("com.vmware.pscoe.sbi.common.actions/firewall/services/ResourceUtil");
+var userName = System.getContext().getParameter("__metadata_userName");
+var dateInfotest = new Date();
+dateInfotest.setMinutes(dateInfotest.getMinutes() + 330);
+var dateInfo = dateInfotest.toISOString().replace("T", " ").split(".")[0];
+var PreValidateTask = /** @class */ (function (_super) {
+    tslib_1.__extends(PreValidateTask, _super);
+    function PreValidateTask() {
+        var _this = _super !== null && _super.apply(this, arguments) || this;
+        _this.logger = Logger_1._.Logger.getLogger("PreValidateTask");
+        return _this;
+    }
+    PreValidateTask.prototype.execute = function () {
+        var _a, _b;
+        this.logger.info("Starting execution of Algosec CSV validation.");
+        var algosecConnector = new AlgosecConnector_1._.AlgosecConnector();
+        // Step 1: Login to Algosec
+        var loginResult = algosecConnector.checkSessionActive();
+        if (!loginResult.valueOf) {
+            this.logger.error("Algosec login failed. Aborting.");
+            throw new Error("Algosec login failed.");
+        }
+        this.logger.info("Logged into Algosec successfully.");
+
+        // Step 2: Retrieve NSMPIDs from the resource element
+        var nspmIdListPath = 'SBI Meghdoot/Firewall/NSMPIDList.csv';
+        var resourceElementNspm = new ResourceElementAccessor_1._.ResourceElementAccessor(nspmIdListPath, false);
+        var nsmpIds = resourceElementNspm.getContent();
+        var nsmpIdsCsvContent = nsmpIds.split(',');
+        System.log("Print NSMP IDs CSV Content : " + nsmpIdsCsvContent[0] + typeof (nsmpIdsCsvContent));
+        var APMIdListPath = 'SBI Meghdoot/Firewall/APMIDList.csv';
+        var resourceElementAPM = new ResourceElementAccessor_1._.ResourceElementAccessor(APMIdListPath, false);
+
+        var APMIds = resourceElementAPM.getContent();
+        var APMIdsCsvContent = APMIds.split(',');
+        this.logger.info("NSMPID List content: " + nsmpIdsCsvContent);
+        this.logger.info("APMID list content : " + APMIdsCsvContent);
+
+        // Step 3: Fetch change request IDs and associated plannedTraffic
+        var approvedChangeRequestDetails = []; // Store both ID and plannedTraffic for "Approved" change request
+        var nonApprovedChangeRequestDetails = []; // Store both ID and plannedTraffic for "Non-Approved" change request
+        var failedNsmpIds = [];
+        var ruleNameTracker = {}; // Track rule names for each NSMPID
+        for (var i = 0; i < nsmpIdsCsvContent.length; i++) {
+            var nsmpId = nsmpIdsCsvContent[i];
+            var APMId = APMIdsCsvContent[i];
+            try {
+
+                var changeRequest = algosecConnector.getChangeRequestId(nsmpId);
+                System.log("Print Change Request  : " + JSON.stringify(changeRequest) + " nspmid : " + nsmpId)
+                if (changeRequest) {
+                    var id = changeRequest.id, plannedTraffic = changeRequest.plannedTraffic, fieldStatus = changeRequest.fieldStatus;
+                    System.log("Field status : " + fieldStatus + " typeOf : " + typeof (fieldStatus) + " condition : " + (fieldStatus == 'resolved'));
+                    if (fieldStatus == "resolved" || fieldStatus == "approved" || fieldStatus == "implement" || fieldStatus == "NI Implement" || fieldStatus == "implementation plan" || fieldStatus == "user accept" || fieldStatus == "validate" || fieldStatus == "pending match" || fieldStatus == "NI Implementer") {
+                        if (id) {
+                            this.logger.info("Fetched change request ID for NSMPID ".concat(nsmpId));
+
+                            // Store both change request ID and its plannedTraffic
+                            //approvedChangeRequestDetails.push({ id: id, APMId: APMId, plannedTraffic: plannedTraffic });
+                            approvedChangeRequestDetails.push({ id: id, APMId: APMId, plannedTraffic: plannedTraffic, zone: changeRequest.zone, requestor: changeRequest.requestor, requesterDepartmentName: changeRequest.requesterDepartmentName, requesterApplicationName: changeRequest.requesterApplicationName, expires: changeRequest.expires });
+                        }
+                        else {
+                            this.logger.warn("No change request ID found for NSMPID: ".concat(nsmpId));
+                        }
+                        if (plannedTraffic && plannedTraffic.length > 0) {
+                            this.logger.info("Fetched planned traffic for NSMPID ".concat(nsmpId, ": ").concat(JSON.stringify(plannedTraffic)));
+                        }
+                        else {
+                            this.logger.warn("No planned traffic found for NSMPID: ".concat(nsmpId));
+                        }
+                    }
+                    else {
+                        this.logger.info("Fetched change request ID for NSMPID ".concat(nsmpId, " is Not Approved"));
+                        // Store both change request ID and its plannedTraffic
+                        nonApprovedChangeRequestDetails.push({ nsmpId: nsmpId, APMId: APMId, fieldStatus: fieldStatus });
+                    }
+                }
+                else {
+                    this.logger.warn("No change request found for NSMPID: ".concat(nsmpId));
+
+                }
+            }
+            catch (err) {
+                this.logger.error("Error fetching change request for NSMPID ".concat(nsmpId, ": ").concat(err.message));
+                failedNsmpIds.push(nsmpId); //Log the nspm ID that failed to fetch
+
+            }
+        }
+
+        System.log(" we reached step 4");
+        // Step 3.1 : save failed NSMPIDs to a seperate resource element
+        if (failedNsmpIds.length > 0) {
+            var failedNsmpIdsPath = "SBI Meghdoot/Firewall/FetchedDetails/failedNSMPIDs/failedNSMPIDs_" + dateInfo + ".csv";
+            ResourceUtil_1._.ResourceUtils.createResourceElement(failedNsmpIdsPath, "");
+            var failedNSMPIDsRe = new ResourceElementAccessor_1._.ResourceElementAccessor(failedNsmpIdsPath, true);
+            ResourceUtil_1._.ResourceUtils.createResourceElement(failedNsmpIdsPath, "");
+            var csvData02 = convertToCSV(failedNsmpIds.map(function (id) { return { "NSMP ID": id }; }), { delimiters: ",", newLine: "\n" });
+            failedNSMPIDsRe.setContent(csvData02);
+            this.logger.info("Failed NSMP ID saved to resource element at ".concat(failedNsmpIdsPath));
+        }
+
+        // Early exit if no approved requests are found:
+        // if (approvedChangeRequestDetails.length === 0) {
+        //     this.logger.warn("No NSMPIds in an approved state. Ending the process early");
+        //     return;
+        // }
+
+        // Step 4: Save change request details (ID and plannedTraffic)
+        var ApprovedChangeRequestDetailsPath = 'SBI Meghdoot/Firewall/FetchedDetails/ApprovedChangeRequestDetails.csv';
+        var ApprovedChangeRequestDetailsRe = new ResourceElementAccessor_1._.ResourceElementAccessor(ApprovedChangeRequestDetailsPath, true);
+        // var csvUtil = System.getModule("com.vmware.pscoe.library.util");
+
+        if (approvedChangeRequestDetails.length > 0) {
+            // Flatten the plannedTraffic data with multiple entries for source, destination, etc.
+            var flatData = [];
+            for (var _i = 0, approvedChangeRequestDetails_1 = approvedChangeRequestDetails; _i < approvedChangeRequestDetails_1.length; _i++) {
+                var detail = approvedChangeRequestDetails_1[_i];
+                System.log("Detail info : " + JSON.stringify(detail));
+                var id = detail.id, APMId = detail.APMId, plannedTraffic = detail.plannedTraffic;
+
+                if (plannedTraffic && plannedTraffic.length > 0) {
+                    for (var _c = 0, plannedTraffic_1 = plannedTraffic; _c < plannedTraffic_1.length; _c++) {
+                        System.log("Planned Traffic info : " + JSON.stringify(plannedTraffic_1));
+                        var traffic = plannedTraffic_1[_c];
+                        var sources = traffic.source.items;
+                        var destinations = traffic.destination.items;
+                        var services = traffic.service.items;
+                        var applications = traffic.application.items[0]["value"];
+                        var actions = traffic.action;
+                        System.log("Print the nsmpId's : " + nsmpId);
+                        var ruleName = "NSPM-".concat(id, "-01");
+                        // If this NSMPID has been used before, increment the rule number
+                        if (ruleNameTracker[id]) {
+                            ruleNameTracker[id]++;
+                        }
+                        else {
+                            ruleNameTracker[id] = 1;
+                        }
+                        // Update rule name with the incremented number
+                        ruleName = "NSPM-".concat(id, "-").concat(VROES.Shims.stringPadStart(String(ruleNameTracker[id]), 2, '0'));
+                        System.log(" Print values: " + JSON.stringify(sources) + "**" + JSON.stringify(destinations) + "**" + JSON.stringify(services) + "**" + JSON.stringify(applications));
+                        // Generate all combinations of source, destination, service, etc.
+                        // for (var _d = 0, sources_1 = sources; _d < sources_1.length; _d++) {
+                        //     var source = sources_1[_d]["value"];
+                        //     for (var _e = 0, destinations_1 = destinations; _e < destinations_1.length; _e++) {
+                        //         var destination = destinations_1[_e]["value"];
+                        //         System.log("Source : " + source["value"] + " Destination : " + destination["value"]);
+                        //         for (var _f = 0, services_1 = services; _f < services_1.length; _f++) {
+
+                        //             var service = services_1[_f]["value"];
+                        //             System.log("Services  : " + service["value"] + " services json : " + JSON.stringify(service));
+                        //             for (var _g = 0, applications_1 = applications; _g < applications_1.length; _g++) {
+                        //                 var application = applications_1[_g]["value"];
+                        // Create a new row for each combination
+                        // flatData.push({
+                        //     "Change Request ID": id,
+                        //     "Rule Name": ruleName,
+                        //     "APM ID": APMId,
+                        //     "Source": getCommaSeparatedString(sources).join(';'),
+                        //     "Destination": getCommaSeparatedString(destinations).join(';'),
+                        //     "Service": getCommaSeparatedString(services).join(';'),
+                        //     "Application": applications,
+                        //     "Action": actions,
+                        // });
+                        flatData.push({
+                            "Change Request ID": id,
+                            "Rule Name": ruleName,
+                            "APM ID": APMId,
+                            "Zone": detail.zone || "",
+                            "Requestor": detail.requestor || "",
+                            "Requester Department": detail.requesterDepartmentName || "",
+                            "RequesterApplication": detail.requesterApplicationName || "",
+                            "Expires": detail.expires || "",
+                            "Source": getCommaSeparatedString(sources).join(';'),
+                            "Destination": getCommaSeparatedString(destinations).join(';'),
+                            "Service": getCommaSeparatedString(services).join(';'),
+                            "Application": applications,
+                            "Action": actions,
+                        });
+                        System.log("Print Flat : " + JSON.stringify(flatData));
+                        System.log("Print OP data : " + getCommaSeparatedString(sources))
+
+                    }
+
+
+                }
+                //             }
+                //         }
+                //     }
+                // }
+
+
+            }
+            //
+            var csvData = convertToCSV(flatData, { delimiters: ",", newLine: "\n" });
+            ApprovedChangeRequestDetailsRe.setContent(csvData);
+            this.logger.info("Change request details (including planned traffic) saved to resource element at ".concat(ApprovedChangeRequestDetailsRe, "."));
+
+        }
+        else {
+            this.logger.warn("No Approved change request details to save.");
+            var ApprovedChangeRequestDetailsPath = 'SBI Meghdoot/Firewall/FetchedDetails/ApprovedChangeRequestDetails.csv';
+            var ApprovedChangeRequestRE = new ResourceElementAccessor_1._.ResourceElementAccessor(ApprovedChangeRequestDetailsPath, true);
+            ApprovedChangeRequestRE.setContent("");
+            this.logger.info("Noapproved change request details message saved to resource element at ".concat(noChangeRequestPath, "."));
+        }
+        if (nonApprovedChangeRequestDetails.length > 0) {
+            this.logger.warn("NoN-Approved change request details being save.");
+
+            var nonApprovedChangeRequestPath = 'SBI Meghdoot/Firewall/FetchedDetails/nonApprovedChangeRequestDetails.csv';
+            var nonApprovedChangeRequestRE = new ResourceElementAccessor_1._.ResourceElementAccessor(nonApprovedChangeRequestPath, true);
+
+            var flatData01 = [];
+            System.log("print Non approved change request detials : " + JSON.stringify(nonApprovedChangeRequestDetails));
+            for (var _h = 0, nonApprovedChangeRequestDetails_1 = nonApprovedChangeRequestDetails; _h < nonApprovedChangeRequestDetails_1.length; _h++) {
+                var detail = nonApprovedChangeRequestDetails_1[_h];
+                var nsmpId = detail.nsmpId, APMId = detail.APMId, fieldStatus = algosecConnector.fetchChangeIdStatus(nsmpId, "status");
+                System.log("print nsmpid : " + nsmpId);
+                System.log(" print details : " + APMId + fieldStatus);
+                System.log("Print status : " + fieldStatus);
+                // Create a new row for each combination
+                flatData01.push({
+                    "Change Request ID": nsmpId,
+                    "APM ID": APMId,
+                    "Status": fieldStatus || "na"
+                });
+
+            }
+
+            System.log("Convert JSOn to CSV : ");
+            var csvData01 = convertToCSV(flatData01, { delimiter: ",", newLine: "\n" });
+            System.log("Set Content" + csvData01);
+            nonApprovedChangeRequestRE.setContent(csvData01);
+            this.logger.info("No Non-Approved change request details message saved to resource element01 at ".concat(nonApprovedChangeRequestPath, "."));
+
+        }
+        else {
+            this.logger.warn("No Non-Approved change request details to save.");
+            var noChangeRequestPath = 'SBI Meghdoot/Firewall/FetchedDetails/nonApprovedChangeRequestDetails.csv';
+            var noChangeRequestRE = new ResourceElementAccessor_1._.ResourceElementAccessor(noChangeRequestPath, true);
+            System.log("Here!!");
+            // csv = convertToCSV(flatData01);
+            // System.log("pint csv : " + csv);
+            noChangeRequestRE.setContent("");
+            this.logger.info("No non-approved change request details message saved to resource element at ".concat(noChangeRequestPath, "."));
+        }
+
+        //Fetch requestor email and CC addresses from configuration
+        var userName = System.getContext().getParameter("__metadata_userName");
+        var requestorName = System.getContext().getParameter("__metadata_userName");
+        System.log("Print requestor name: " + requestorName);
+        var requestorEmail = new UserService_1._.UserService().getEmailAddress(requestorName);
+        System.log("Print requestor email: " + requestorEmail);
+        //Send email with pending CSV attached
+        // var emailService = new EmailService_1._.EmailService();
+        // var rawData = ApprovedChangeRequestDetailsRe.getContent();
+        // System.log("Raw attachment data: " + rawData + typeof (rawData));
+
+        // var baseBuilder = new BaseBuilder_1._.BaseBuilder();
+        // var csvMimeAttachment = baseBuilder.createAttachment("Firewall_Pre_Validation_OnlyApproved_NotValidated_Report.csv", rawData);
+        // this.context.contentInFile = csvMimeAttachment;
+
+        // // Send email
+        // // var listOfAttachments = [];
+        // // listOfAttachments.push(csvMimeAttachment);
+        // // emailService.preValidationPhase1Notification(requestorEmail, requestorName, listOfAttachments);
+        // emailService.preValidationNotification(requestorEmail, requestorName, [csvMimeAttachment]);
+
+        // this.logger.info("Email sent to " + requestorEmail);
+        // System.log("Email sent to " + requestorEmail);
+        var emailService = new EmailService_1._.EmailService();
+        var baseBuilder = new BaseBuilder_1._.BaseBuilder();
+
+        var attachments = [];
+
+        if (approvedChangeRequestDetails.length > 0) {
+            var rawDataApproved = ApprovedChangeRequestDetailsRe.getContent();
+            System.log("Raw ApprovedChangeRequestDetails attachment data: " + rawDataApproved + typeof (rawDataApproved));
+            var approvedAttachment = baseBuilder.createAttachment("Firewall_Pre_Validation_OnlyApproved_NotValidated_Report.csv", rawDataApproved);
+            attachments.push(approvedAttachment);
+            this.context.contentInFile = approvedAttachment; // Only needed if used later
+        }
+
+        if (failedNsmpIds.length > 0) {
+            var rawDataFailed = failedNSMPIDsRe.getContent();
+            System.log("Raw failedNsmpIds attachment data: " + rawDataFailed + typeof (rawDataFailed));
+            var failedAttachment = baseBuilder.createAttachment("Firewall_Pre_Validation_FailedNsmpIds_Report.csv", rawDataFailed);
+            attachments.push(failedAttachment);
+        }
+
+        if (attachments.length > 0) {
+            emailService.preValidationNotification(requestorEmail, requestorName, attachments);
+            this.logger.info("Email sent to " + requestorEmail);
+            System.log("Email sent to " + requestorEmail);
+        } else {
+            this.logger.warn("No ApprovedChangeRequestDetails or failedNsmpIds found. Skipping FAR email.");
+            System.log("No ApprovedChangeRequestDetails or failedNsmpIds found. Skipping FAR email.");
+        }
+    }
+    function convertToCSV(data) {
+        //Get the header by extracting the keys
+        const headers = Object.keys(data[0]);
+
+        //Create the rows by mapping each object to string of comma-seprated values
+        const rows = data.map(function (row) {
+            return headers.map(function (header) {
+                return row[header];
+            }).join(',');
+
+        });
+
+
+        //Join headers and rows together to cerate the final csv string
+        var result = [headers.join(',')].concat(rows).join('\n');
+        return result;
+    };
+    function getCommaSeparatedString(data) {
+        var result = [];
+        for (var i = 0; i < data.length; i++) {
+            result.push(data[i].value);
+        }
+        System.log("Type of result : " + typeof (result));
+        return result;
+    }
+    return PreValidateTask;
+
+}(pipeline_1._.Task));
+exports.PreValidateTask = PreValidateTask;
+return exports;
